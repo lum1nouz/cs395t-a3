@@ -1,6 +1,6 @@
 from .base_llm import BaseLLM
 from .data import Dataset, benchmark
-
+import torch
 
 def load() -> BaseLLM:
     from pathlib import Path
@@ -49,7 +49,11 @@ def format_example(prompt: str, answer: str) -> dict[str, str]:
     """
     Construct a question / answer pair. Consider rounding the answer to make it easier for the LLM.
     """
-    raise NotImplementedError()
+    answer_str = f"<answer>{answer}</answer>"
+    return {
+        "question": prompt.strip(),
+        "answer": answer_str
+    }
 
 
 class TokenizedDataset:
@@ -78,9 +82,52 @@ def train_model(
     output_dir: str,
     **kwargs,
 ):
-    raise NotImplementedError()
-    test_model(output_dir)
+    from transformers import TrainingArguments, Trainer
+    from peft import get_peft_model, LoraConfig
 
+    model = BaseLLM()
+    tokenizer = model.tokenizer
+
+    peft_config = LoraConfig(
+        r=8,
+        lora_alpha=32,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules="all-linear",
+    )
+    model.model = get_peft_model(model.model, peft_config)
+
+    if torch.cuda.is_available():
+        model.model.enable_input_require_grads()
+
+    train_data = Dataset("train")
+    tokenized = TokenizedDataset(tokenizer, train_data, format_example)
+
+    args = TrainingArguments(
+        output_dir=output_dir,
+        per_device_train_batch_size=32,
+        gradient_checkpointing=True,
+        learning_rate=1e-3,
+        num_train_epochs=5,
+        logging_dir=output_dir,
+        report_to="tensorboard",
+        logging_steps=10,
+        save_strategy="epoch",
+        save_total_limit=1,
+    )
+
+    trainer = Trainer(
+        model=model.model,
+        args=args,
+        train_dataset=tokenized,
+        tokenizer=tokenizer,
+    )
+
+    trainer.train()
+
+    trainer.save_model(output_dir)
+
+    test_model(output_dir)
 
 def test_model(ckpt_path: str):
     testset = Dataset("valid")
